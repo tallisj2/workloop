@@ -11,6 +11,10 @@ from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
 import streamlit as st
 
 
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
+
 st.set_page_config(
     page_title="Work Loop Analyser",
     page_icon="📈",
@@ -26,7 +30,7 @@ st.write(
 
 
 # ============================================================
-# FILE IMPORT
+# IMPORT RAW DATA
 # ============================================================
 
 def extract_data(uploaded_file):
@@ -84,10 +88,18 @@ def extract_data(uploaded_file):
 
             try:
 
+                force_voltage = float(
+                    numeric_values[0]
+                )
+
+                length_value = float(
+                    numeric_values[1]
+                )
+
                 extracted_rows.append(
                     (
-                        float(numeric_values[0]),
-                        float(numeric_values[1]),
+                        force_voltage,
+                        length_value,
                         line_number,
                     )
                 )
@@ -103,11 +115,11 @@ def extract_data(uploaded_file):
     if len(extracted_rows) < 3:
 
         raise ValueError(
-            "Fewer than three rows containing two numeric "
-            "values were found."
+            "Fewer than three rows containing at least "
+            "two numeric values were found."
         )
 
-    data = pd.DataFrame(
+    extracted_data = pd.DataFrame(
         extracted_rows,
         columns=[
             "Force_V",
@@ -116,20 +128,20 @@ def extract_data(uploaded_file):
         ],
     )
 
-    data.insert(
+    extracted_data.insert(
         0,
         "Sample",
         np.arange(
-            len(data),
+            len(extracted_data),
             dtype=int,
         ),
     )
 
-    return data, skipped_lines
+    return extracted_data, skipped_lines
 
 
 # ============================================================
-# VALID FILTER WINDOW
+# FILTER WINDOW CHECK
 # ============================================================
 
 def odd_window(
@@ -165,7 +177,7 @@ def odd_window(
 
 
 # ============================================================
-# CYCLE DETECTION
+# DETECT COMPLETE CYCLES
 # ============================================================
 
 def detect_cycles(
@@ -224,7 +236,8 @@ def detect_cycles(
             continue
 
         later_troughs = negative_troughs[
-            negative_troughs > positive_peak
+            negative_troughs
+            > positive_peak
         ]
 
         if len(later_troughs) == 0:
@@ -278,11 +291,14 @@ def detect_cycles(
 
             future_values = detection_length[
                 index:
-                index + int(end_hold_points)
+                index + int(
+                    end_hold_points
+                )
             ]
 
             remains_above_boundary = np.all(
-                future_values >= boundary_level
+                future_values
+                >= boundary_level
             )
 
             if (
@@ -347,6 +363,164 @@ def detect_cycles(
 
 
 # ============================================================
+# LANDMARK-ALIGNED INTERPOLATION
+# ============================================================
+
+def interpolate_cycle_by_landmarks(
+    data,
+    cycle_start,
+    positive_peak,
+    negative_trough,
+    cycle_end,
+    force_column,
+    total_points,
+):
+
+    total_points = int(
+        total_points
+    )
+
+    first_section_points = max(
+        2,
+        int(
+            round(
+                total_points * 0.25
+            )
+        ),
+    )
+
+    second_section_points = max(
+        2,
+        int(
+            round(
+                total_points * 0.50
+            )
+        ),
+    )
+
+    third_section_points = max(
+        2,
+        total_points
+        - first_section_points
+        - second_section_points
+        + 2,
+    )
+
+    sections = [
+        (
+            cycle_start,
+            positive_peak,
+            0.0,
+            25.0,
+            first_section_points,
+            False,
+        ),
+        (
+            positive_peak,
+            negative_trough,
+            25.0,
+            75.0,
+            second_section_points,
+            False,
+        ),
+        (
+            negative_trough,
+            cycle_end,
+            75.0,
+            100.0,
+            third_section_points,
+            True,
+        ),
+    ]
+
+    phase_parts = []
+    force_parts = []
+    length_parts = []
+
+    for (
+        section_start,
+        section_end,
+        phase_start,
+        phase_end,
+        section_point_count,
+        include_endpoint,
+    ) in sections:
+
+        if section_end <= section_start:
+            return None
+
+        source_indices = np.arange(
+            section_start,
+            section_end + 1,
+        )
+
+        source_phase = np.linspace(
+            phase_start,
+            phase_end,
+            len(source_indices),
+        )
+
+        target_phase = np.linspace(
+            phase_start,
+            phase_end,
+            section_point_count,
+            endpoint=include_endpoint,
+        )
+
+        source_force = data.loc[
+            source_indices,
+            force_column,
+        ].to_numpy()
+
+        source_length = data.loc[
+            source_indices,
+            "Length_normalised",
+        ].to_numpy()
+
+        interpolated_force = np.interp(
+            target_phase,
+            source_phase,
+            source_force,
+        )
+
+        interpolated_length = np.interp(
+            target_phase,
+            source_phase,
+            source_length,
+        )
+
+        phase_parts.append(
+            target_phase
+        )
+
+        force_parts.append(
+            interpolated_force
+        )
+
+        length_parts.append(
+            interpolated_length
+        )
+
+    common_phase = np.concatenate(
+        phase_parts
+    )
+
+    aligned_force = np.concatenate(
+        force_parts
+    )
+
+    aligned_length = np.concatenate(
+        length_parts
+    )
+
+    return (
+        common_phase,
+        aligned_force,
+        aligned_length,
+    )
+
+
+# ============================================================
 # FORCE SMOOTHING
 # ============================================================
 
@@ -369,7 +543,7 @@ def smooth_force(
         force_values
     )
 
-    signals = {
+    smoothed_signals = {
         "Raw calibrated force": (
             force_values.copy()
         )
@@ -382,7 +556,7 @@ def smooth_force(
 
     if valid_moving_window is not None:
 
-        signals[
+        smoothed_signals[
             "Moving average"
         ] = (
             pd.Series(force_values)
@@ -407,7 +581,7 @@ def smooth_force(
             valid_savgol_window - 1,
         )
 
-        signals[
+        smoothed_signals[
             "Savitzky-Golay"
         ] = savgol_filter(
             force_values,
@@ -420,7 +594,7 @@ def smooth_force(
             mode="interp",
         )
 
-    signals[
+    smoothed_signals[
         "Gaussian"
     ] = gaussian_filter1d(
         force_values,
@@ -455,7 +629,7 @@ def smooth_force(
 
         if number_of_points > required_padding:
 
-            signals[
+            smoothed_signals[
                 "Butterworth"
             ] = filtfilt(
                 filter_b,
@@ -467,7 +641,7 @@ def smooth_force(
 
         pass
 
-    return signals
+    return smoothed_signals
 
 
 # ============================================================
@@ -484,7 +658,7 @@ def safe_name(text):
 
 
 # ============================================================
-# ZIP FILE
+# CREATE ZIP
 # ============================================================
 
 def make_zip(dataframes):
@@ -711,7 +885,7 @@ if uploaded_file is None:
 
 
 # ============================================================
-# IMPORT AND PROCESS DATA
+# IMPORT DATA
 # ============================================================
 
 try:
@@ -728,6 +902,10 @@ except Exception as error:
 
     st.stop()
 
+
+# ============================================================
+# NORMALISE LENGTH
+# ============================================================
 
 number_of_baseline_points = min(
     int(baseline_points),
@@ -758,6 +936,11 @@ data["Length_normalised"] = (
     data["Length_raw"]
     - length_baseline
 )
+
+
+# ============================================================
+# CALIBRATE FORCE
+# ============================================================
 
 data["Force_mN"] = (
     (
@@ -821,7 +1004,9 @@ data["Cycle"] = pd.Series(
     dtype="Int64",
 )
 
-data["Point_within_cycle"] = pd.Series(
+data[
+    "Point_within_cycle"
+] = pd.Series(
     pd.NA,
     index=data.index,
     dtype="Int64",
@@ -890,9 +1075,7 @@ for signal_name, signal_values in smoothed_signals.items():
         )
     )
 
-    data[column_name] = (
-        signal_values
-    )
+    data[column_name] = signal_values
 
     signal_columns[
         signal_name
@@ -900,7 +1083,7 @@ for signal_name, signal_values in smoothed_signals.items():
 
 
 # ============================================================
-# SELECT FIGURE SIGNALS
+# DISPLAY SELECTION
 # ============================================================
 
 st.sidebar.header(
@@ -1126,8 +1309,8 @@ st.plotly_chart(
 if len(cycles) == 0:
 
     st.warning(
-        "No complete cycles were detected. Check whether "
-        "green peak markers and orange trough markers appear."
+        "No complete cycles were detected. Check the "
+        "positive peak, negative trough, and boundary settings."
     )
 
     st.download_button(
@@ -1135,7 +1318,9 @@ if len(cycles) == 0:
         data=data.to_csv(
             index=False
         ).encode("utf-8"),
-        file_name="complete_processed_data.csv",
+        file_name=(
+            "complete_processed_data.csv"
+        ),
         mime="text/csv",
     )
 
@@ -1162,7 +1347,7 @@ st.dataframe(
 
 
 # ============================================================
-# PROCESS INDIVIDUAL CYCLES
+# INDIVIDUAL CYCLE OUTPUTS
 # ============================================================
 
 wide_cycle_frames = []
@@ -1261,40 +1446,52 @@ for cycle in cycles:
             long_part
         )
 
-        length_values = cycle_data[
+        cycle_length_values = cycle_data[
             "Length_normalised"
         ].to_numpy()
 
-        force_values = cycle_data[
+        cycle_force_values = cycle_data[
             signal_column
         ].to_numpy()
 
         signed_work = float(
             trapezoid(
-                y=force_values,
-                x=length_values,
+                y=cycle_force_values,
+                x=cycle_length_values,
             )
         )
 
         metric_rows.append(
             {
                 "Cycle": cycle_number,
-                "Force_processing": signal_name,
-                "Signed_work_mN_length_units": signed_work,
-                "Absolute_work_mN_length_units": abs(
+                "Force_processing": (
+                    signal_name
+                ),
+                "Signed_work_mN_length_units": (
                     signed_work
                 ),
+                "Absolute_work_mN_length_units": (
+                    abs(signed_work)
+                ),
                 "Minimum_force_mN": float(
-                    np.min(force_values)
+                    np.min(
+                        cycle_force_values
+                    )
                 ),
                 "Maximum_force_mN": float(
-                    np.max(force_values)
+                    np.max(
+                        cycle_force_values
+                    )
                 ),
                 "Mean_force_mN": float(
-                    np.mean(force_values)
+                    np.mean(
+                        cycle_force_values
+                    )
                 ),
                 "Length_range": float(
-                    np.ptp(length_values)
+                    np.ptp(
+                        cycle_length_values
+                    )
                 ),
                 "Number_of_points": int(
                     len(cycle_data)
@@ -1385,7 +1582,9 @@ for cycle in cycles:
             + str(cycle_number)
             + ": force-length work loop"
         ),
-        xaxis_title="Normalised length",
+        xaxis_title=(
+            "Normalised length"
+        ),
         yaxis_title="Force (mN)",
         template="plotly_white",
         height=550,
@@ -1464,7 +1663,7 @@ for cycle in cycles:
 
 
 # ============================================================
-# COMBINE INDIVIDUAL OUTPUTS
+# COMBINE INDIVIDUAL RESULTS
 # ============================================================
 
 all_cycles_wide = pd.concat(
@@ -1495,17 +1694,17 @@ zip_files[
 
 
 # ============================================================
-# AVERAGE NORMALISED WORK LOOP
+# LANDMARK-ALIGNED AVERAGE WORK LOOP
 # ============================================================
 
 st.header(
-    "Average normalised work loop"
+    "Landmark-aligned average work loop"
 )
 
 st.write(
-    "Selected cycles are resampled to a common cycle phase. "
-    "Length is normalised within each cycle to -100% to +100% "
-    "of its own half-range. Force remains in mN."
+    "Each selected cycle is aligned so that cycle start is 0%, "
+    "positive length peak is 25%, negative length trough is 75%, "
+    "and cycle end is 100%."
 )
 
 available_cycles = [
@@ -1551,17 +1750,10 @@ variability_display = st.selectbox(
         "95% confidence interval",
         "None",
     ],
-    index=0,
 )
 
 
 if len(selected_average_cycles) >= 1:
-
-    common_phase = np.linspace(
-        0.0,
-        100.0,
-        int(phase_points),
-    )
 
     force_matrix = []
     normalised_length_matrix = []
@@ -1583,35 +1775,50 @@ if len(selected_average_cycles) >= 1:
             cycle_row["Start_index"]
         )
 
+        positive_peak = int(
+            cycle_row[
+                "Positive_peak_index"
+            ]
+        )
+
+        negative_trough = int(
+            cycle_row[
+                "Negative_trough_index"
+            ]
+        )
+
         cycle_end = int(
             cycle_row["End_index"]
         )
 
-        selected_cycle_data = data.loc[
-            cycle_start:cycle_end
-        ].copy()
-
-        original_phase = np.linspace(
-            0.0,
-            100.0,
-            len(selected_cycle_data),
+        interpolation_result = interpolate_cycle_by_landmarks(
+            data=data,
+            cycle_start=cycle_start,
+            positive_peak=positive_peak,
+            negative_trough=negative_trough,
+            cycle_end=cycle_end,
+            force_column=average_force_column,
+            total_points=int(
+                phase_points
+            ),
         )
 
-        interpolated_force = np.interp(
-            common_phase,
-            original_phase,
-            selected_cycle_data[
-                average_force_column
-            ].to_numpy(),
-        )
+        if interpolation_result is None:
 
-        interpolated_length = np.interp(
-            common_phase,
-            original_phase,
-            selected_cycle_data[
-                "Length_normalised"
-            ].to_numpy(),
-        )
+            st.warning(
+                "Cycle "
+                + str(cycle_number)
+                + " could not be landmark-aligned "
+                "and was excluded."
+            )
+
+            continue
+
+        (
+            cycle_phase,
+            interpolated_force,
+            interpolated_length,
+        ) = interpolation_result
 
         length_minimum = float(
             np.min(
@@ -1640,7 +1847,8 @@ if len(selected_average_cycles) >= 1:
             st.warning(
                 "Cycle "
                 + str(cycle_number)
-                + " has no length range and was excluded."
+                + " has no measurable length range "
+                "and was excluded."
             )
 
             continue
@@ -1667,7 +1875,7 @@ if len(selected_average_cycles) >= 1:
                 {
                     "Cycle": cycle_number,
                     "Cycle_phase_percent": (
-                        common_phase
+                        cycle_phase
                     ),
                     "Length_percent_half_range": (
                         length_percentage
@@ -1682,12 +1890,16 @@ if len(selected_average_cycles) >= 1:
             )
         )
 
+        original_cycle_data = data.loc[
+            cycle_start:cycle_end
+        ]
+
         physical_work = float(
             trapezoid(
-                y=selected_cycle_data[
+                y=original_cycle_data[
                     average_force_column
                 ].to_numpy(),
-                x=selected_cycle_data[
+                x=original_cycle_data[
                     "Length_normalised"
                 ].to_numpy(),
             )
@@ -1701,7 +1913,7 @@ if len(selected_average_cycles) >= 1:
                 ),
                 "Original_length_range": float(
                     np.ptp(
-                        selected_cycle_data[
+                        original_cycle_data[
                             "Length_normalised"
                         ].to_numpy()
                     )
@@ -1726,7 +1938,11 @@ if len(selected_average_cycles) >= 1:
             normalised_length_matrix
         )
 
-        number_of_cycles = (
+        common_phase = average_long_parts[0][
+            "Cycle_phase_percent"
+        ].to_numpy()
+
+        number_of_average_cycles = (
             force_array.shape[0]
         )
 
@@ -1740,7 +1956,7 @@ if len(selected_average_cycles) >= 1:
             axis=0,
         )
 
-        if number_of_cycles > 1:
+        if number_of_average_cycles > 1:
 
             sd_force = np.std(
                 force_array,
@@ -1751,7 +1967,7 @@ if len(selected_average_cycles) >= 1:
             sem_force = (
                 sd_force
                 / np.sqrt(
-                    number_of_cycles
+                    number_of_average_cycles
                 )
             )
 
@@ -1796,7 +2012,7 @@ if len(selected_average_cycles) >= 1:
                     + ci95_force
                 ),
                 "Number_of_cycles": (
-                    number_of_cycles
+                    number_of_average_cycles
                 ),
                 "Force_processing": (
                     average_force_method
@@ -1873,8 +2089,8 @@ if len(selected_average_cycles) >= 1:
 
         average_loop_figure.update_layout(
             title=(
-                "Individual and mean "
-                "amplitude-normalised work loops"
+                "Landmark-aligned individual "
+                "and mean work loops"
             ),
             xaxis_title=(
                 "Normalised length "
@@ -1887,7 +2103,7 @@ if len(selected_average_cycles) >= 1:
 
 
         # ----------------------------------------------------
-        # MEAN FORCE AGAINST PHASE
+        # FORCE BY PHASE FIGURE
         # ----------------------------------------------------
 
         phase_figure = go.Figure()
@@ -1996,7 +2212,7 @@ if len(selected_average_cycles) >= 1:
         phase_figure.update_layout(
             title=(
                 "Mean force across "
-                "normalised cycle phase"
+                "landmark-aligned cycle phase"
             ),
             xaxis_title=(
                 "Cycle phase (%)"
@@ -2008,7 +2224,7 @@ if len(selected_average_cycles) >= 1:
 
 
         # ----------------------------------------------------
-        # LENGTH NORMALISATION CHECK
+        # LENGTH ALIGNMENT FIGURE
         # ----------------------------------------------------
 
         length_phase_figure = go.Figure()
@@ -2043,7 +2259,7 @@ if len(selected_average_cycles) >= 1:
                     line=dict(
                         width=1
                     ),
-                    opacity=0.25,
+                    opacity=0.30,
                 )
             )
 
@@ -2062,10 +2278,27 @@ if len(selected_average_cycles) >= 1:
             )
         )
 
+        length_phase_figure.add_vline(
+            x=25,
+            line_dash="dot",
+            line_color="green",
+            annotation_text=(
+                "Positive peak"
+            ),
+        )
+
+        length_phase_figure.add_vline(
+            x=75,
+            line_dash="dot",
+            line_color="orange",
+            annotation_text=(
+                "Negative trough"
+            ),
+        )
+
         length_phase_figure.update_layout(
             title=(
-                "Normalised length "
-                "across cycle phase"
+                "Landmark alignment check"
             ),
             xaxis_title=(
                 "Cycle phase (%)"
@@ -2079,11 +2312,11 @@ if len(selected_average_cycles) >= 1:
         )
 
 
-        average_tab, phase_tab, length_tab, average_export_tab = st.tabs(
+        average_tab, phase_tab, length_tab, output_tab = st.tabs(
             [
                 "Average work loop",
                 "Mean force by phase",
-                "Length normalisation check",
+                "Landmark alignment check",
                 "Average outputs",
             ]
         )
@@ -2096,9 +2329,8 @@ if len(selected_average_cycles) >= 1:
             )
 
             st.caption(
-                "Thin lines are individual amplitude-normalised "
-                "loops. The thick black line is the phase-matched "
-                "mean loop."
+                "Positive peaks are aligned at 25% phase "
+                "and negative troughs at 75% phase."
             )
 
         with phase_tab:
@@ -2115,30 +2347,30 @@ if len(selected_average_cycles) >= 1:
                 use_container_width=True,
             )
 
-        with average_export_tab:
+        with output_tab:
 
             st.download_button(
                 label=(
-                    "Download interpolated individual loops"
+                    "Download landmark-aligned individual loops"
                 ),
                 data=average_individual_data.to_csv(
                     index=False
                 ).encode("utf-8"),
                 file_name=(
-                    "average_input_loops_long.csv"
+                    "landmark_aligned_loops.csv"
                 ),
                 mime="text/csv",
             )
 
             st.download_button(
                 label=(
-                    "Download mean loop and variability"
+                    "Download landmark-aligned mean loop"
                 ),
                 data=average_summary.to_csv(
                     index=False
                 ).encode("utf-8"),
                 file_name=(
-                    "average_normalised_work_loop.csv"
+                    "landmark_aligned_mean_loop.csv"
                 ),
                 mime="text/csv",
             )
@@ -2164,11 +2396,11 @@ if len(selected_average_cycles) >= 1:
             )
 
         zip_files[
-            "average_input_loops_long.csv"
+            "landmark_aligned_loops.csv"
         ] = average_individual_data
 
         zip_files[
-            "average_normalised_work_loop.csv"
+            "landmark_aligned_mean_loop.csv"
         ] = average_summary
 
         zip_files[
@@ -2178,15 +2410,15 @@ if len(selected_average_cycles) >= 1:
     else:
 
         st.warning(
-            "No selected cycle contained "
-            "a valid length range."
+            "No selected cycle could be "
+            "landmark-aligned."
         )
 
 else:
 
     st.info(
         "Select at least one cycle "
-        "to create the average outputs."
+        "to generate the average outputs."
     )
 
 
@@ -2286,7 +2518,7 @@ with export_column_2:
 
 
 # ============================================================
-# METRICS
+# METRICS TABLE
 # ============================================================
 
 st.subheader(
@@ -2300,8 +2532,8 @@ st.dataframe(
 )
 
 st.caption(
-    "Physical work is calculated from calibrated force "
-    "and the original non-percentage length data. The "
-    "percentage-normalised length is used only to compare "
-    "and average loop shape."
+    "Physical work is calculated using calibrated force "
+    "and original non-percentage length. The percentage "
+    "normalisation is used only for comparison and averaging "
+    "of loop shape."
 )
