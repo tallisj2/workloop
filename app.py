@@ -63,7 +63,7 @@ def make_odd(value: int) -> int:
 def valid_odd_window(
     requested_window: int,
     number_of_points: int,
-) -> Optional"""
+) -> Optional[int]:
     Return a valid odd filter window that does not exceed
     the number of available data points.
     """
