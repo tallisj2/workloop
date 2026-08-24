@@ -16,7 +16,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="Force-Length Work Loop Analyser",
+    page_title="Work Loop Analyser",
     page_icon="📈",
     layout="wide",
 )
@@ -24,21 +24,146 @@ st.set_page_config(
 st.title("Force-Length Work Loop Analyser")
 
 st.write(
-    "Upload a comma-delimited DAT file with force in column 1 "
-    "and length in column 2."
+    "Upload an undelimited, whitespace-delimited, tab-delimited, "
+    "comma-delimited, or semicolon-delimited DAT file. "
+    "The app extracts the first two numeric values on each data "
+    "row as force and length."
 )
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# EXTRACT NUMERIC DATA FROM RAW FILE
 # ============================================================
 
-def odd_window(requested, number_of_points):
+def extract_numeric_data(uploaded_file):
+
+    raw_file = uploaded_file.getvalue()
+
+    decoded_text = None
+
+    for encoding in (
+        "utf-8-sig",
+        "utf-8",
+        "latin-1",
+    ):
+
+        try:
+
+            decoded_text = raw_file.decode(
+                encoding
+            )
+
+            break
+
+        except UnicodeDecodeError:
+
+            pass
+
+    if decoded_text is None:
+
+        raise ValueError(
+            "The file could not be decoded as a text file."
+        )
+
+    number_pattern = re.compile(
+        r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+        r"(?:[eE][-+]?\d+)?"
+    )
+
+    extracted_rows = []
+
+    skipped_lines = 0
+
+    source_lines = decoded_text.splitlines()
+
+    for line_number, source_line in enumerate(
+        source_lines,
+        start=1,
+    ):
+
+        source_line = source_line.strip()
+
+        if source_line == "":
+            continue
+
+        numeric_values = number_pattern.findall(
+            source_line
+        )
+
+        if len(numeric_values) >= 2:
+
+            try:
+
+                force_value = float(
+                    numeric_values[0]
+                )
+
+                length_value = float(
+                    numeric_values[1]
+                )
+
+                extracted_rows.append(
+                    (
+                        force_value,
+                        length_value,
+                        line_number,
+                    )
+                )
+
+            except ValueError:
+
+                skipped_lines += 1
+
+        else:
+
+            skipped_lines += 1
+
+    if len(extracted_rows) < 3:
+
+        raise ValueError(
+            "Fewer than three rows containing at least "
+            "two numeric values were found. The application "
+            "expects force first and length second on each "
+            "data row."
+        )
+
+    extracted_data = pd.DataFrame(
+        extracted_rows,
+        columns=[
+            "Force_raw",
+            "Length_raw",
+            "Source_line",
+        ],
+    )
+
+    extracted_data.insert(
+        0,
+        "Sample",
+        np.arange(
+            len(extracted_data),
+            dtype=int,
+        ),
+    )
+
+    return extracted_data, skipped_lines
+
+
+# ============================================================
+# FILTER WINDOW CHECK
+# ============================================================
+
+def odd_window(
+    requested_window,
+    number_of_points,
+):
 
     if number_of_points < 3:
         return None
 
-    window = max(3, int(requested))
+    window = max(
+        3,
+        int(requested_window),
+    )
 
     if window % 2 == 0:
         window += 1
@@ -48,7 +173,10 @@ def odd_window(requested, number_of_points):
     else:
         maximum_window = number_of_points - 1
 
-    window = min(window, maximum_window)
+    window = min(
+        window,
+        maximum_window,
+    )
 
     if window < 3:
         return None
@@ -56,112 +184,8 @@ def odd_window(requested, number_of_points):
     return window
 
 
-def safe_name(text):
-
-    cleaned_name = re.sub(
-        r"[^A-Za-z0-9]+",
-        "_",
-        text,
-    )
-
-    return cleaned_name.strip("_")
-
-
 # ============================================================
-# FILE IMPORT
-# ============================================================
-
-def read_data(uploaded_file):
-
-    raw_file = uploaded_file.getvalue()
-
-    imported_data = None
-    last_error = None
-
-    encodings = [
-        "utf-8-sig",
-        "utf-8",
-        "latin-1",
-    ]
-
-    for encoding in encodings:
-
-        try:
-
-            imported_data = pd.read_csv(
-                io.BytesIO(raw_file),
-                sep=",",
-                header=None,
-                comment="#",
-                encoding=encoding,
-                engine="python",
-                skip_blank_lines=True,
-            )
-
-            break
-
-        except Exception as error:
-
-            last_error = error
-
-    if imported_data is None:
-
-        raise ValueError(
-            "The file could not be read. "
-            + str(last_error)
-        )
-
-    if imported_data.shape[1] < 2:
-
-        raise ValueError(
-            "The file must contain at least two "
-            "comma-delimited columns."
-        )
-
-    imported_data = imported_data.iloc[:, :2].copy()
-
-    imported_data.columns = [
-        "Force_raw",
-        "Length_raw",
-    ]
-
-    imported_data["Force_raw"] = pd.to_numeric(
-        imported_data["Force_raw"],
-        errors="coerce",
-    )
-
-    imported_data["Length_raw"] = pd.to_numeric(
-        imported_data["Length_raw"],
-        errors="coerce",
-    )
-
-    imported_data = imported_data.dropna(
-        subset=[
-            "Force_raw",
-            "Length_raw",
-        ]
-    ).reset_index(drop=True)
-
-    if len(imported_data) < 3:
-
-        raise ValueError(
-            "Fewer than three valid numeric rows were found."
-        )
-
-    imported_data.insert(
-        0,
-        "Sample",
-        np.arange(
-            len(imported_data),
-            dtype=int,
-        ),
-    )
-
-    return imported_data
-
-
-# ============================================================
-# IDENTIFY RUNS OF TRUE VALUES
+# IDENTIFY CONTINUOUS RUNS
 # ============================================================
 
 def true_runs(boolean_mask):
@@ -202,7 +226,7 @@ def true_runs(boolean_mask):
 
 
 # ============================================================
-# CYCLE DETECTION
+# DETECT LENGTH-CHANGE CYCLES
 # ============================================================
 
 def detect_cycles(
@@ -274,7 +298,7 @@ def detect_cycles(
                 )
             )
 
-    cycles = []
+    detected_cycles = []
 
     search_from_index = 0
 
@@ -316,9 +340,11 @@ def detect_cycles(
         if number_of_cycle_points < minimum_cycle_points:
             continue
 
-        cycle_number = len(cycles) + 1
+        cycle_number = (
+            len(detected_cycles) + 1
+        )
 
-        cycles.append(
+        detected_cycles.append(
             {
                 "Cycle": cycle_number,
                 "Start_index": int(
@@ -341,11 +367,11 @@ def detect_cycles(
 
         search_from_index = cycle_end + 1
 
-    return cycles, length_change
+    return detected_cycles, length_change
 
 
 # ============================================================
-# FORCE SMOOTHING
+# APPLY FORCE SMOOTHING
 # ============================================================
 
 def smooth_force(
@@ -403,7 +429,7 @@ def smooth_force(
         ] = moving_average_values
 
     # --------------------------------------------------------
-    # Savitzky-Golay filter
+    # Savitzky-Golay
     # --------------------------------------------------------
 
     valid_savgol_window = odd_window(
@@ -437,7 +463,7 @@ def smooth_force(
         ] = savgol_values
 
     # --------------------------------------------------------
-    # Gaussian filter
+    # Gaussian
     # --------------------------------------------------------
 
     gaussian_values = gaussian_filter1d(
@@ -456,7 +482,7 @@ def smooth_force(
     ] = gaussian_values
 
     # --------------------------------------------------------
-    # Butterworth low-pass filter
+    # Butterworth low-pass
     # --------------------------------------------------------
 
     try:
@@ -505,10 +531,25 @@ def smooth_force(
 
 
 # ============================================================
-# ZIP FILE CREATION
+# SAFE EXPORT COLUMN NAMES
 # ============================================================
 
-def create_zip(dataframes):
+def safe_name(text):
+
+    cleaned_name = re.sub(
+        r"[^A-Za-z0-9]+",
+        "_",
+        text,
+    )
+
+    return cleaned_name.strip("_")
+
+
+# ============================================================
+# CREATE ZIP FILE
+# ============================================================
+
+def make_zip(dataframes):
 
     zip_buffer = io.BytesIO()
 
@@ -547,14 +588,14 @@ st.sidebar.subheader(
 )
 
 baseline_points = st.sidebar.number_input(
-    "Final points used for length baseline",
+    "Final length points used for baseline",
     min_value=10,
     max_value=1000000,
     value=1000,
     step=10,
     help=(
-        "The average of the final selected length "
-        "points is subtracted from every length value."
+        "The mean of the final selected length "
+        "values is subtracted from every length value."
     ),
 )
 
@@ -662,11 +703,11 @@ butterworth_cutoff = st.sidebar.slider(
 # ============================================================
 
 uploaded_file = st.file_uploader(
-    "Drag and drop a .dat, .csv, or .txt file",
+    "Drag and drop a DAT, TXT, or CSV file",
     type=[
         "dat",
-        "csv",
         "txt",
+        "csv",
     ],
     accept_multiple_files=False,
 )
@@ -681,12 +722,12 @@ if uploaded_file is None:
 
 
 # ============================================================
-# IMPORT FILE
+# EXTRACT DATA FROM FILE
 # ============================================================
 
 try:
 
-    data = read_data(
+    data, skipped_lines = extract_numeric_data(
         uploaded_file
     )
 
@@ -840,41 +881,84 @@ for signal_name, signal_values in smoothed_signals.items():
 # SUMMARY
 # ============================================================
 
-summary_column_1, summary_column_2, summary_column_3 = (
-    st.columns(3)
+summary_column_1, summary_column_2, summary_column_3, summary_column_4 = (
+    st.columns(4)
 )
 
 summary_column_1.metric(
-    "Valid data points",
-    "{:,}".format(len(data)),
+    "Numeric rows extracted",
+    "{:,}".format(
+        len(data)
+    ),
 )
 
 summary_column_2.metric(
+    "Skipped non-data lines",
+    "{:,}".format(
+        skipped_lines
+    ),
+)
+
+summary_column_3.metric(
     "Length baseline",
     "{:.6g}".format(
         length_baseline
     ),
 )
 
-summary_column_3.metric(
+summary_column_4.metric(
     "Cycles detected",
     len(cycles),
 )
 
 st.caption(
-    "The length baseline was calculated from the final "
-    + "{:,}".format(number_of_baseline_points)
-    + " valid length points."
+    "The parser extracted the first two numeric values "
+    "from each line. These were interpreted as force and "
+    "length, respectively. The length baseline is the mean "
+    "of the final {:,} extracted length values.".format(
+        number_of_baseline_points
+    )
 )
 
+
+# ============================================================
+# CHECK EXTRACTED DATA
+# ============================================================
+
 with st.expander(
-    "Preview processed data"
+    "Check extracted force and length data"
 ):
 
     st.dataframe(
-        data.head(500),
+        data[
+            [
+                "Sample",
+                "Source_line",
+                "Force_raw",
+                "Length_raw",
+                "Length_normalised",
+            ]
+        ].head(500),
         use_container_width=True,
         hide_index=True,
+    )
+
+    st.download_button(
+        label=(
+            "Download extracted two-column data"
+        ),
+        data=data[
+            [
+                "Force_raw",
+                "Length_raw",
+            ]
+        ].to_csv(
+            index=False
+        ).encode("utf-8"),
+        file_name=(
+            "extracted_force_length.csv"
+        ),
+        mime="text/csv",
     )
 
 
@@ -953,26 +1037,20 @@ st.plotly_chart(
 if len(cycles) == 0:
 
     st.warning(
-        "No complete cycles were detected. "
-        "Adjust the cycle-detection settings "
-        "in the sidebar."
-    )
-
-    st.write(
-        "Try reducing the sustained positive increase "
-        "points, reducing the minimum cycle points, or "
-        "adjusting the negative-length threshold."
+        "No complete cycles were detected. Check the "
+        "extracted columns above, then adjust the "
+        "cycle-detection controls in the sidebar."
     )
 
     st.download_button(
         label=(
-            "Download processed data without cycles"
+            "Download complete processed data"
         ),
         data=data.to_csv(
             index=False
         ).encode("utf-8"),
         file_name=(
-            "processed_data_no_cycles.csv"
+            "complete_processed_data.csv"
         ),
         mime="text/csv",
     )
@@ -1000,7 +1078,7 @@ st.dataframe(
 
 
 # ============================================================
-# PROCESS INDIVIDUAL CYCLES
+# PREPARE OUTPUT STORAGE
 # ============================================================
 
 wide_cycle_frames = []
@@ -1012,8 +1090,18 @@ metric_rows = []
 zip_files = {
     "complete_processed_data.csv": data,
     "cycle_boundaries.csv": cycle_summary,
+    "extracted_force_length.csv": data[
+        [
+            "Force_raw",
+            "Length_raw",
+        ]
+    ],
 }
 
+
+# ============================================================
+# PROCESS EACH CYCLE
+# ============================================================
 
 for cycle in cycles:
 
@@ -1054,7 +1142,7 @@ for cycle in cycles:
 
     for signal_name, signal_column in signal_columns.items():
 
-        long_format_part = pd.DataFrame(
+        cycle_long_part = pd.DataFrame(
             {
                 "Cycle": cycle_number,
                 "Point_within_cycle": (
@@ -1089,7 +1177,7 @@ for cycle in cycles:
         )
 
         long_format_parts.append(
-            long_format_part
+            cycle_long_part
         )
 
         length_for_integral = (
@@ -1114,7 +1202,9 @@ for cycle in cycles:
         metric_rows.append(
             {
                 "Cycle": cycle_number,
-                "Force_processing": signal_name,
+                "Force_processing": (
+                    signal_name
+                ),
                 "Signed_force_length_integral": (
                     signed_integral
                 ),
@@ -1122,22 +1212,34 @@ for cycle in cycles:
                     abs(signed_integral)
                 ),
                 "Minimum_force": float(
-                    np.min(force_for_integral)
+                    np.min(
+                        force_for_integral
+                    )
                 ),
                 "Maximum_force": float(
-                    np.max(force_for_integral)
+                    np.max(
+                        force_for_integral
+                    )
                 ),
                 "Mean_force": float(
-                    np.mean(force_for_integral)
+                    np.mean(
+                        force_for_integral
+                    )
                 ),
                 "Minimum_length": float(
-                    np.min(length_for_integral)
+                    np.min(
+                        length_for_integral
+                    )
                 ),
                 "Maximum_length": float(
-                    np.max(length_for_integral)
+                    np.max(
+                        length_for_integral
+                    )
                 ),
                 "Length_range": float(
-                    np.ptp(length_for_integral)
+                    np.ptp(
+                        length_for_integral
+                    )
                 ),
                 "Number_of_points": int(
                     len(cycle_data)
@@ -1161,13 +1263,13 @@ for cycle in cycles:
     ] = cycle_long_data
 
     # --------------------------------------------------------
-    # Force versus sample graph
+    # Force smoothing graph
     # --------------------------------------------------------
 
     force_figure = go.Figure()
 
     # --------------------------------------------------------
-    # Force versus length work-loop graph
+    # Force-length work-loop graph
     # --------------------------------------------------------
 
     work_loop_figure = go.Figure()
@@ -1224,7 +1326,7 @@ for cycle in cycles:
         title=(
             "Cycle "
             + str(cycle_number)
-            + ": force smoothing comparison"
+            + ": force smoothing"
         ),
         xaxis_title="Sample",
         yaxis_title="Force",
@@ -1249,33 +1351,6 @@ for cycle in cycles:
     st.subheader(
         "Cycle "
         + str(cycle_number)
-    )
-
-    information_column_1, information_column_2, information_column_3 = (
-        st.columns(3)
-    )
-
-    information_column_1.metric(
-        "Start sample",
-        int(
-            cycle_data[
-                "Sample"
-            ].iloc[0]
-        ),
-    )
-
-    information_column_2.metric(
-        "End sample",
-        int(
-            cycle_data[
-                "Sample"
-            ].iloc[-1]
-        ),
-    )
-
-    information_column_3.metric(
-        "Number of points",
-        len(cycle_data),
     )
 
     force_tab, work_loop_tab, export_tab = st.tabs(
@@ -1312,7 +1387,8 @@ for cycle in cycles:
 
         st.write(
             "Wide format contains one row per sample "
-            "and one force column for each smoothing method."
+            "and a separate force column for each "
+            "smoothing method."
         )
 
         st.download_button(
@@ -1364,7 +1440,7 @@ for cycle in cycles:
 
 
 # ============================================================
-# COMBINE CYCLE DATA
+# COMBINE CYCLE RESULTS
 # ============================================================
 
 all_cycles_wide = pd.concat(
@@ -1403,8 +1479,8 @@ st.header(
 )
 
 st.write(
-    "The exported files contain the original force, "
-    "original length, normalised length, detected cycle, "
+    "The exported data contain the extracted force and "
+    "length values, normalised length, cycle allocation, "
     "point within each cycle, and every smoothed force signal."
 )
 
@@ -1483,9 +1559,9 @@ with export_column_2:
 
     st.download_button(
         label=(
-            "Download all results as a ZIP file"
+            "Download everything as a ZIP file"
         ),
-        data=create_zip(
+        data=make_zip(
             zip_files
         ),
         file_name=(
@@ -1496,7 +1572,7 @@ with export_column_2:
 
 
 # ============================================================
-# METRICS
+# METRICS TABLE
 # ============================================================
 
 st.subheader(
@@ -1510,9 +1586,8 @@ st.dataframe(
 )
 
 st.caption(
-    "The force-length integral is calculated using "
-    "the trapezoidal rule. Its units are the force "
-    "unit multiplied by the length unit. The sign "
-    "depends on the direction of the loop and the "
-    "force and length sign conventions."
+    "The force-length integral uses the trapezoidal rule. "
+    "Its units are force units multiplied by length units. "
+    "Its sign depends on loop direction and the force and "
+    "length sign conventions."
 )
