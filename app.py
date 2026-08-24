@@ -24,8 +24,8 @@ st.set_page_config(
 st.title("Force-Length Work Loop Analyser")
 
 st.write(
-    "Upload a raw DAT file. The first two numeric values on "
-    "each data row are interpreted as force in volts and length."
+    "Upload a raw DAT file. The first two numeric values on each "
+    "data row are interpreted as force in volts and length."
 )
 
 
@@ -36,14 +36,13 @@ st.write(
 def extract_numeric_data(uploaded_file):
 
     raw_file = uploaded_file.getvalue()
-
     decoded_text = None
 
-    for encoding in (
+    for encoding in [
         "utf-8-sig",
         "utf-8",
         "latin-1",
-    ):
+    ]:
 
         try:
 
@@ -55,12 +54,12 @@ def extract_numeric_data(uploaded_file):
 
         except UnicodeDecodeError:
 
-            pass
+            continue
 
     if decoded_text is None:
 
         raise ValueError(
-            "The file could not be decoded as text."
+            "The file could not be decoded as a text file."
         )
 
     number_pattern = re.compile(
@@ -69,53 +68,55 @@ def extract_numeric_data(uploaded_file):
     )
 
     extracted_rows = []
-
     skipped_lines = 0
 
-    source_lines = decoded_text.splitlines()
-
     for line_number, source_line in enumerate(
-        source_lines,
+        decoded_text.splitlines(),
         start=1,
     ):
 
+        stripped_line = source_line.strip()
+
+        if stripped_line == "":
+            continue
+
         numeric_values = number_pattern.findall(
-            source_line.strip()
+            stripped_line
         )
 
-        if len(numeric_values) >= 2:
+        if len(numeric_values) < 2:
 
-            try:
+            skipped_lines += 1
+            continue
 
-                force_voltage = float(
-                    numeric_values[0]
+        try:
+
+            force_voltage = float(
+                numeric_values[0]
+            )
+
+            length_value = float(
+                numeric_values[1]
+            )
+
+            extracted_rows.append(
+                (
+                    force_voltage,
+                    length_value,
+                    line_number,
                 )
+            )
 
-                length_value = float(
-                    numeric_values[1]
-                )
-
-                extracted_rows.append(
-                    (
-                        force_voltage,
-                        length_value,
-                        line_number,
-                    )
-                )
-
-            except ValueError:
-
-                skipped_lines += 1
-
-        elif source_line.strip():
+        except ValueError:
 
             skipped_lines += 1
 
     if len(extracted_rows) < 3:
 
         raise ValueError(
-            "Fewer than three rows containing at least "
-            "two numeric values were found."
+            "Fewer than three rows containing at least two "
+            "numeric values were found. The application expects "
+            "force voltage first and length second on each data row."
         )
 
     extracted_data = pd.DataFrame(
@@ -140,7 +141,7 @@ def extract_numeric_data(uploaded_file):
 
 
 # ============================================================
-# VALIDATE FILTER WINDOW
+# VALIDATE SMOOTHING WINDOWS
 # ============================================================
 
 def odd_window(
@@ -176,169 +177,269 @@ def odd_window(
 
 
 # ============================================================
-# IDENTIFY SUSTAINED UPWARD CROSSINGS
+# FIND SUSTAINED POSITIVE MOVEMENT
 # ============================================================
 
-def sustained_upward_crossings(
+def find_cycle_start(
     length_values,
-    lower_level,
-    upper_level,
+    start_search_index,
+    positive_change_threshold,
     sustained_points,
-    refractory_points,
+    baseline_tolerance,
 ):
 
-    detected_crossings = []
+    length_change = np.diff(
+        length_values,
+        prepend=length_values[0],
+    )
+
+    final_possible_start = (
+        len(length_values)
+        - sustained_points
+    )
+
+    for index in range(
+        max(1, int(start_search_index)),
+        final_possible_start,
+    ):
+
+        close_to_baseline = (
+            abs(length_values[index])
+            <= baseline_tolerance
+        )
+
+        future_changes = length_change[
+            index:index + sustained_points
+        ]
+
+        sustained_positive_movement = np.all(
+            future_changes
+            > positive_change_threshold
+        )
+
+        if (
+            close_to_baseline
+            and sustained_positive_movement
+        ):
+
+            return index
+
+    return None
+
+
+# ============================================================
+# DETECT COMPLETE LENGTH CYCLES
+# ============================================================
+
+def detect_cycles(
+    length_values,
+    positive_change_threshold,
+    sustained_points,
+    baseline_tolerance,
+    positive_excursion,
+    negative_excursion,
+    cycle_end_level,
+    end_sustained_points,
+    minimum_cycle_points,
+    maximum_cycle_points,
+):
+
+    length_values = np.asarray(
+        length_values,
+        dtype=float,
+    )
+
+    detected_cycles = []
+    cycle_boundaries = []
 
     number_of_points = len(
         length_values
     )
 
-    last_crossing = -int(
-        refractory_points
-    )
+    search_index = 1
 
-    index = 1
-
-    while index < (
-        number_of_points
+    while (
+        search_index
+        < number_of_points
         - sustained_points
     ):
 
-        was_below_lower_level = (
-            length_values[index - 1]
-            <= lower_level
+        cycle_start = find_cycle_start(
+            length_values=length_values,
+            start_search_index=search_index,
+            positive_change_threshold=(
+                positive_change_threshold
+            ),
+            sustained_points=sustained_points,
+            baseline_tolerance=(
+                baseline_tolerance
+            ),
         )
 
-        future_values = length_values[
-            index:index + sustained_points
-        ]
+        if cycle_start is None:
+            break
 
-        remains_above_upper_level = np.all(
-            future_values >= upper_level
+        # The cycle must first reach the positive excursion.
+        positive_candidates = np.where(
+            length_values[cycle_start:]
+            >= positive_excursion
+        )[0]
+
+        if len(positive_candidates) == 0:
+            break
+
+        positive_excursion_index = (
+            cycle_start
+            + int(positive_candidates[0])
         )
 
-        generally_rising = (
-            future_values[-1]
-            > future_values[0]
+        # It must then reach the negative excursion.
+        negative_candidates = np.where(
+            length_values[
+                positive_excursion_index:
+            ]
+            <= negative_excursion
+        )[0]
+
+        if len(negative_candidates) == 0:
+            break
+
+        negative_excursion_index = (
+            positive_excursion_index
+            + int(negative_candidates[0])
         )
 
-        if (
-            was_below_lower_level
-            and remains_above_upper_level
-            and generally_rising
+        # It must then return upward to the end level.
+        cycle_end = None
+
+        final_end_search = (
+            number_of_points
+            - end_sustained_points
+        )
+
+        for index in range(
+            negative_excursion_index + 1,
+            final_end_search,
         ):
 
-            points_since_last_crossing = (
-                index - last_crossing
+            current_length = (
+                length_values[index]
+            )
+
+            previous_length = (
+                length_values[index - 1]
+            )
+
+            upward_crossing = (
+                previous_length
+                < cycle_end_level
+                and current_length
+                >= cycle_end_level
+            )
+
+            future_values = length_values[
+                index:
+                index + end_sustained_points
+            ]
+
+            stays_at_or_above_end_level = np.all(
+                future_values
+                >= cycle_end_level
             )
 
             if (
-                points_since_last_crossing
-                >= refractory_points
+                upward_crossing
+                and stays_at_or_above_end_level
             ):
 
-                detected_crossings.append(
-                    index
-                )
+                cycle_end = index
+                break
 
-                last_crossing = index
+        if cycle_end is None:
+            break
 
-                index += refractory_points
-
-                continue
-
-        index += 1
-
-    return detected_crossings
-
-
-# ============================================================
-# DETECT COMPLETE CYCLES
-# ============================================================
-
-def detect_cycles(
-    length_values,
-    lower_level,
-    upper_level,
-    sustained_points,
-    minimum_cycle_points,
-    maximum_cycle_points,
-):
-
-    refractory_points = max(
-        int(minimum_cycle_points),
-        int(sustained_points),
-    )
-
-    cycle_starts = sustained_upward_crossings(
-        length_values=length_values,
-        lower_level=lower_level,
-        upper_level=upper_level,
-        sustained_points=int(
-            sustained_points
-        ),
-        refractory_points=refractory_points,
-    )
-
-    detected_cycles = []
-
-    for crossing_index in range(
-        len(cycle_starts) - 1
-    ):
-
-        cycle_start = cycle_starts[
-            crossing_index
-        ]
-
-        cycle_end = cycle_starts[
-            crossing_index + 1
-        ]
-
-        number_of_cycle_points = (
+        cycle_length = (
             cycle_end
             - cycle_start
             + 1
         )
 
-        if (
-            number_of_cycle_points
-            < minimum_cycle_points
-        ):
-
-            continue
-
-        if (
-            maximum_cycle_points > 0
-            and number_of_cycle_points
-            > maximum_cycle_points
-        ):
-
-            continue
-
-        cycle_number = (
-            len(detected_cycles) + 1
+        cycle_is_long_enough = (
+            cycle_length
+            >= minimum_cycle_points
         )
 
-        detected_cycles.append(
-            {
-                "Cycle": cycle_number,
-                "Start_index": int(
-                    cycle_start
-                ),
-                "End_index": int(
-                    cycle_end
-                ),
-                "Number_of_points": int(
-                    number_of_cycle_points
-                ),
-            }
+        cycle_is_not_too_long = (
+            maximum_cycle_points == 0
+            or cycle_length
+            <= maximum_cycle_points
         )
 
-    return detected_cycles, cycle_starts
+        if (
+            cycle_is_long_enough
+            and cycle_is_not_too_long
+        ):
+
+            cycle_number = (
+                len(detected_cycles) + 1
+            )
+
+            detected_cycles.append(
+                {
+                    "Cycle": cycle_number,
+                    "Start_index": int(
+                        cycle_start
+                    ),
+                    "End_index": int(
+                        cycle_end
+                    ),
+                    "Number_of_points": int(
+                        cycle_length
+                    ),
+                    "Positive_excursion_index": int(
+                        positive_excursion_index
+                    ),
+                    "Negative_excursion_index": int(
+                        negative_excursion_index
+                    ),
+                }
+            )
+
+            cycle_boundaries.append(
+                int(cycle_start)
+            )
+
+            cycle_boundaries.append(
+                int(cycle_end)
+            )
+
+            search_index = (
+                cycle_end + 1
+            )
+
+        else:
+
+            search_index = (
+                cycle_start
+                + sustained_points
+            )
+
+    cycle_boundaries = sorted(
+        list(
+            set(
+                cycle_boundaries
+            )
+        )
+    )
+
+    return (
+        detected_cycles,
+        cycle_boundaries,
+    )
 
 
 # ============================================================
-# SMOOTH FORCE DATA
+# SMOOTH CALIBRATED FORCE
 # ============================================================
 
 def smooth_force(
@@ -351,18 +452,23 @@ def smooth_force(
     butterworth_cutoff,
 ):
 
+    force_values = np.asarray(
+        force_values,
+        dtype=float,
+    )
+
+    number_of_points = len(
+        force_values
+    )
+
     smoothed_signals = {
         "Raw calibrated force": (
             force_values.copy()
         )
     }
 
-    number_of_points = len(
-        force_values
-    )
-
     # --------------------------------------------------------
-    # Moving average
+    # MOVING AVERAGE
     # --------------------------------------------------------
 
     valid_moving_window = odd_window(
@@ -386,7 +492,7 @@ def smooth_force(
         )
 
     # --------------------------------------------------------
-    # Savitzky-Golay
+    # SAVITZKY-GOLAY
     # --------------------------------------------------------
 
     valid_savgol_window = odd_window(
@@ -405,13 +511,17 @@ def smooth_force(
             "Savitzky-Golay"
         ] = savgol_filter(
             force_values,
-            window_length=valid_savgol_window,
-            polyorder=valid_savgol_order,
+            window_length=(
+                valid_savgol_window
+            ),
+            polyorder=(
+                valid_savgol_order
+            ),
             mode="interp",
         )
 
     # --------------------------------------------------------
-    # Gaussian
+    # GAUSSIAN
     # --------------------------------------------------------
 
     smoothed_signals[
@@ -425,7 +535,7 @@ def smooth_force(
     )
 
     # --------------------------------------------------------
-    # Butterworth
+    # BUTTERWORTH LOW-PASS FILTER
     # --------------------------------------------------------
 
     try:
@@ -469,7 +579,7 @@ def smooth_force(
 
 
 # ============================================================
-# SAFE COLUMN NAMES
+# CREATE SAFE COLUMN NAMES
 # ============================================================
 
 def safe_name(text):
@@ -484,7 +594,7 @@ def safe_name(text):
 
 
 # ============================================================
-# ZIP EXPORT
+# CREATE ZIP EXPORT
 # ============================================================
 
 def make_zip(dataframes):
@@ -512,7 +622,7 @@ def make_zip(dataframes):
 
 
 # ============================================================
-# FORCE CALIBRATION SETTINGS
+# FORCE CALIBRATION CONTROLS
 # ============================================================
 
 st.sidebar.header(
@@ -537,14 +647,14 @@ force_offset_voltage = st.sidebar.number_input(
     step=0.001,
     format="%.6f",
     help=(
-        "This voltage is subtracted from every recorded "
-        "force voltage before conversion to millinewtons."
+        "This voltage is subtracted from the recorded "
+        "force voltage before conversion to mN."
     ),
 )
 
 
 # ============================================================
-# LENGTH NORMALISATION SETTINGS
+# LENGTH NORMALISATION CONTROLS
 # ============================================================
 
 st.sidebar.header(
@@ -570,7 +680,7 @@ baseline_points = st.sidebar.number_input(
 
 
 # ============================================================
-# CYCLE DETECTION SETTINGS
+# CYCLE DETECTION CONTROLS
 # ============================================================
 
 st.sidebar.header(
@@ -578,43 +688,71 @@ st.sidebar.header(
 )
 
 st.sidebar.caption(
-    "Each complete cycle runs from one sustained "
-    "upward baseline crossing to the next sustained "
-    "upward baseline crossing."
+    "A cycle begins with sustained positive movement close "
+    "to baseline. The signal must then reach both the positive "
+    "and negative excursions before returning upward to the "
+    "cycle end level."
 )
 
-lower_crossing_level = st.sidebar.number_input(
-    "Lower crossing level",
-    value=-0.02,
-    step=0.001,
-    format="%.6f",
-    help=(
-        "The length signal must first be at or below "
-        "this value."
-    ),
-)
-
-upper_crossing_level = st.sidebar.number_input(
-    "Upper crossing level",
-    value=0.02,
-    step=0.001,
-    format="%.6f",
-    help=(
-        "The signal must then remain above this value "
-        "to confirm an upward crossing."
-    ),
+positive_change_threshold = st.sidebar.number_input(
+    "Minimum positive change per sample",
+    min_value=0.0,
+    value=0.0001,
+    step=0.0001,
+    format="%.7f",
 )
 
 sustained_points = st.sidebar.number_input(
-    "Points sustained above upper level",
+    "Points required for sustained positive movement",
     min_value=2,
     max_value=10000,
     value=10,
     step=1,
 )
 
+baseline_tolerance = st.sidebar.number_input(
+    "Start baseline tolerance",
+    min_value=0.0,
+    value=0.10,
+    step=0.01,
+    format="%.4f",
+)
+
+positive_excursion = st.sidebar.number_input(
+    "Positive excursion that must be reached",
+    value=0.50,
+    step=0.05,
+    format="%.4f",
+)
+
+negative_excursion = st.sidebar.number_input(
+    "Negative excursion that must be reached",
+    value=-0.50,
+    step=0.05,
+    format="%.4f",
+)
+
+cycle_end_level = st.sidebar.number_input(
+    "Cycle end level on upward return",
+    value=0.0,
+    step=0.01,
+    format="%.4f",
+)
+
+end_sustained_points = st.sidebar.number_input(
+    "Points sustained after cycle end",
+    min_value=1,
+    max_value=10000,
+    value=10,
+    step=1,
+    help=(
+        "The signal must remain at or above the cycle end "
+        "level for this number of points."
+    ),
+)
+
 minimum_cycle_points = st.sidebar.number_input(
-    "Minimum points per cycle",
+    "Minimum points per complete cycle",
     min_value=10,
     max_value=1000000,
     value=500,
@@ -631,7 +769,7 @@ maximum_cycle_points = st.sidebar.number_input(
 
 
 # ============================================================
-# SMOOTHING SETTINGS
+# FORCE SMOOTHING CONTROLS
 # ============================================================
 
 st.sidebar.header(
@@ -684,6 +822,9 @@ butterworth_cutoff = st.sidebar.slider(
     max_value=0.999,
     value=0.050,
     step=0.001,
+    help=(
+        "A lower cutoff produces stronger smoothing."
+    ),
 )
 
 
@@ -782,21 +923,33 @@ data["Force_mN"] = (
 
 
 # ============================================================
-# DETECT CYCLES
+# DETECT COMPLETE CYCLES
 # ============================================================
 
-cycles, crossing_starts = detect_cycles(
+cycles, cycle_boundaries = detect_cycles(
     length_values=data[
         "Length_normalised"
     ].to_numpy(),
-    lower_level=float(
-        lower_crossing_level
-    ),
-    upper_level=float(
-        upper_crossing_level
+    positive_change_threshold=float(
+        positive_change_threshold
     ),
     sustained_points=int(
         sustained_points
+    ),
+    baseline_tolerance=float(
+        baseline_tolerance
+    ),
+    positive_excursion=float(
+        positive_excursion
+    ),
+    negative_excursion=float(
+        negative_excursion
+    ),
+    cycle_end_level=float(
+        cycle_end_level
+    ),
+    end_sustained_points=int(
+        end_sustained_points
     ),
     minimum_cycle_points=int(
         minimum_cycle_points
@@ -812,9 +965,7 @@ data["Cycle"] = pd.Series(
     dtype="Int64",
 )
 
-data[
-    "Point_within_cycle"
-] = pd.Series(
+data["Point_within_cycle"] = pd.Series(
     pd.NA,
     index=data.index,
     dtype="Int64",
@@ -891,7 +1042,7 @@ for signal_name, signal_values in smoothed_signals.items():
 
 
 # ============================================================
-# SELECT SIGNALS DISPLAYED ON FIGURES
+# FIGURE DISPLAY SELECTION
 # ============================================================
 
 st.sidebar.header(
@@ -927,59 +1078,62 @@ if len(displayed_signals) == 0:
 # SUMMARY
 # ============================================================
 
-summary_column_1, summary_column_2, summary_column_3, summary_column_4 = (
-    st.columns(4)
+summary_1, summary_2, summary_3, summary_4 = st.columns(
+    4
 )
 
-summary_column_1.metric(
+summary_1.metric(
     "Numeric rows",
     "{:,}".format(
         len(data)
     ),
 )
 
-summary_column_2.metric(
+summary_2.metric(
     "Skipped lines",
     "{:,}".format(
         skipped_lines
     ),
 )
 
-summary_column_3.metric(
-    "Upward crossings",
-    len(crossing_starts),
+summary_3.metric(
+    "Cycle boundaries",
+    len(cycle_boundaries),
 )
 
-summary_column_4.metric(
+summary_4.metric(
     "Complete cycles",
     len(cycles),
 )
 
 st.caption(
-    "Force conversion: force (mN) = "
-    "(recorded voltage - zero offset) × "
-    "calibration (mN/V)."
+    "Force conversion: Force (mN) = "
+    "(recorded voltage - zero offset) × calibration (mN/V)."
 )
 
 
 # ============================================================
-# CHECK PROCESSED DATA
+# PREVIEW PROCESSED DATA
 # ============================================================
 
 with st.expander(
     "Check extracted and calibrated data"
 ):
 
+    preview_columns = [
+        "Sample",
+        "Source_line",
+        "Force_V",
+        "Force_mN",
+        "Length_raw",
+        "Length_normalised",
+        "Cycle",
+        "Point_within_cycle",
+    ]
+
     st.dataframe(
         data[
-            [
-                "Sample",
-                "Source_line",
-                "Force_V",
-                "Force_mN",
-                "Length_raw",
-                "Length_normalised",
-            ]
+            preview_columns
         ].head(500),
         use_container_width=True,
         hide_index=True,
@@ -1022,33 +1176,44 @@ length_figure.add_trace(
 
 length_figure.add_hline(
     y=float(
-        lower_crossing_level
+        cycle_end_level
     ),
     line_dash="dot",
-    line_color="orange",
+    line_color="blue",
     annotation_text=(
-        "Lower crossing level"
+        "Cycle end level"
     ),
 )
 
 length_figure.add_hline(
     y=float(
-        upper_crossing_level
+        positive_excursion
     ),
     line_dash="dot",
     line_color="green",
     annotation_text=(
-        "Upper crossing level"
+        "Required positive excursion"
     ),
 )
 
-for crossing_start in crossing_starts:
+length_figure.add_hline(
+    y=float(
+        negative_excursion
+    ),
+    line_dash="dot",
+    line_color="orange",
+    annotation_text=(
+        "Required negative excursion"
+    ),
+)
+
+for boundary in cycle_boundaries:
 
     length_figure.add_vline(
-        x=crossing_start,
+        x=boundary,
         line_dash="dash",
         line_color="blue",
-        opacity=0.5,
+        opacity=0.70,
     )
 
 for cycle in cycles:
@@ -1065,6 +1230,9 @@ for cycle in cycles:
         annotation_text=(
             "Cycle "
             + str(cycle["Cycle"])
+        ),
+        annotation_position=(
+            "top left"
         ),
     )
 
@@ -1085,16 +1253,15 @@ st.plotly_chart(
 
 
 # ============================================================
-# STOP IF NO COMPLETE CYCLES
+# STOP IF NO CYCLES ARE DETECTED
 # ============================================================
 
 if len(cycles) == 0:
 
     st.warning(
-        "No complete cycles were detected. The blue "
-        "dashed lines show detected upward crossings. "
-        "Adjust the lower and upper crossing levels, "
-        "sustained points, or cycle-length limits."
+        "No complete cycles were detected. Adjust the minimum "
+        "positive change, baseline tolerance, positive excursion, "
+        "negative excursion, cycle end level, or cycle-length limits."
     )
 
     st.download_button(
@@ -1114,7 +1281,7 @@ if len(cycles) == 0:
 
 
 # ============================================================
-# CYCLE BOUNDARIES
+# CYCLE BOUNDARY TABLE
 # ============================================================
 
 cycle_summary = pd.DataFrame(
@@ -1133,20 +1300,17 @@ st.dataframe(
 
 
 # ============================================================
-# PROCESS CYCLES
+# PROCESS EACH CYCLE
 # ============================================================
 
 wide_cycle_frames = []
-
 long_cycle_frames = []
-
 metric_rows = []
 
 zip_files = {
     "complete_processed_data.csv": data,
     "cycle_boundaries.csv": cycle_summary,
 }
-
 
 for cycle in cycles:
 
@@ -1177,10 +1341,14 @@ for cycle in cycles:
         cycle_data
     )
 
-    zip_files[
+    wide_filename = (
         "cycle_"
         + str(cycle_number)
         + "_wide.csv"
+    )
+
+    zip_files[
+        wide_filename
     ] = cycle_data
 
     long_format_parts = []
@@ -1198,6 +1366,11 @@ for cycle in cycles:
                 "Original_sample": (
                     cycle_data[
                         "Sample"
+                    ].to_numpy()
+                ),
+                "Force_V": (
+                    cycle_data[
+                        "Force_V"
                     ].to_numpy()
                 ),
                 "Length_raw": (
@@ -1225,14 +1398,18 @@ for cycle in cycles:
             long_format_part
         )
 
+        length_values = cycle_data[
+            "Length_normalised"
+        ].to_numpy()
+
+        force_values = cycle_data[
+            signal_column
+        ].to_numpy()
+
         signed_integral = float(
             trapezoid(
-                y=cycle_data[
-                    signal_column
-                ].to_numpy(),
-                x=cycle_data[
-                    "Length_normalised"
-                ].to_numpy(),
+                y=force_values,
+                x=length_values,
             )
         )
 
@@ -1249,25 +1426,33 @@ for cycle in cycles:
                     abs(signed_integral)
                 ),
                 "Minimum_force_mN": float(
-                    cycle_data[
-                        signal_column
-                    ].min()
+                    np.min(
+                        force_values
+                    )
                 ),
                 "Maximum_force_mN": float(
-                    cycle_data[
-                        signal_column
-                    ].max()
+                    np.max(
+                        force_values
+                    )
                 ),
                 "Mean_force_mN": float(
-                    cycle_data[
-                        signal_column
-                    ].mean()
+                    np.mean(
+                        force_values
+                    )
+                ),
+                "Minimum_length": float(
+                    np.min(
+                        length_values
+                    )
+                ),
+                "Maximum_length": float(
+                    np.max(
+                        length_values
+                    )
                 ),
                 "Length_range": float(
                     np.ptp(
-                        cycle_data[
-                            "Length_normalised"
-                        ].to_numpy()
+                        length_values
                     )
                 ),
                 "Number_of_points": int(
@@ -1285,20 +1470,26 @@ for cycle in cycles:
         cycle_long_data
     )
 
-    zip_files[
+    long_filename = (
         "cycle_"
         + str(cycle_number)
         + "_long.csv"
+    )
+
+    zip_files[
+        long_filename
     ] = cycle_long_data
 
+
     # --------------------------------------------------------
-    # CREATE SELECTED FORCE FIGURE
+    # CREATE FORCE AGAINST SAMPLE FIGURE
     # --------------------------------------------------------
 
     force_figure = go.Figure()
 
+
     # --------------------------------------------------------
-    # CREATE WORK-LOOP FIGURE
+    # CREATE FORCE-LENGTH WORK LOOP
     # --------------------------------------------------------
 
     work_loop_figure = go.Figure()
@@ -1343,6 +1534,15 @@ for cycle in cycles:
                 line=dict(
                     width=line_width
                 ),
+                customdata=cycle_data[
+                    "Sample"
+                ],
+                hovertemplate=(
+                    "Length: %{x:.6g}<br>"
+                    "Force: %{y:.6g} mN<br>"
+                    "Sample: %{customdata}"
+                    "<extra></extra>"
+                ),
             )
         )
 
@@ -1362,7 +1562,7 @@ for cycle in cycles:
         title=(
             "Cycle "
             + str(cycle_number)
-            + ": work loop"
+            + ": force-length work loop"
         ),
         xaxis_title=(
             "Normalised length"
@@ -1377,7 +1577,26 @@ for cycle in cycles:
         + str(cycle_number)
     )
 
-    force_tab, work_loop_tab, export_tab = st.tabs(
+    cycle_info_1, cycle_info_2, cycle_info_3 = st.columns(
+        3
+    )
+
+    cycle_info_1.metric(
+        "Start sample",
+        cycle_start,
+    )
+
+    cycle_info_2.metric(
+        "End sample",
+        cycle_end,
+    )
+
+    cycle_info_3.metric(
+        "Number of points",
+        len(cycle_data),
+    )
+
+    force_tab, loop_tab, export_tab = st.tabs(
         [
             "Force smoothing",
             "Work loop",
@@ -1391,58 +1610,64 @@ for cycle in cycles:
             force_figure,
             use_container_width=True,
             key=(
-                "force_"
+                "force_figure_"
                 + str(cycle_number)
             ),
         )
 
-    with work_loop_tab:
+    with loop_tab:
 
         st.plotly_chart(
             work_loop_figure,
             use_container_width=True,
             key=(
-                "loop_"
+                "loop_figure_"
                 + str(cycle_number)
             ),
         )
 
     with export_tab:
 
-        st.download_button(
-            label=(
-                "Download wide-format CSV"
-            ),
-            data=cycle_data.to_csv(
-                index=False
-            ).encode("utf-8"),
-            file_name=(
-                "cycle_"
-                + str(cycle_number)
-                + "_wide.csv"
-            ),
-            mime="text/csv",
-            key=(
-                "wide_"
-                + str(cycle_number)
-            ),
+        st.write(
+            "Wide format has one row per sample and one "
+            "column for each smoothed force signal."
         )
 
         st.download_button(
             label=(
-                "Download long-format CSV"
+                "Download Cycle "
+                + str(cycle_number)
+                + " wide-format CSV"
+            ),
+            data=cycle_data.to_csv(
+                index=False
+            ).encode("utf-8"),
+            file_name=wide_filename,
+            mime="text/csv",
+            key=(
+                "wide_download_"
+                + str(cycle_number)
+            ),
+        )
+
+        st.write(
+            "Long format has separate rows for each "
+            "force-processing method."
+        )
+
+        st.download_button(
+            label=(
+                "Download Cycle "
+                + str(cycle_number)
+                + " long-format CSV"
             ),
             data=cycle_long_data.to_csv(
                 index=False
             ).encode("utf-8"),
-            file_name=(
-                "cycle_"
-                + str(cycle_number)
-                + "_long.csv"
-            ),
+            file_name=long_filename,
             mime="text/csv",
             key=(
-                "long_"
+                "long_download_"
                 + str(cycle_number)
             ),
         )
@@ -1480,15 +1705,21 @@ zip_files[
 
 
 # ============================================================
-# EXPORT RESULTS
+# EXPORT ALL RESULTS
 # ============================================================
 
 st.header(
     "Export all results"
 )
 
-export_column_1, export_column_2 = (
-    st.columns(2)
+st.write(
+    "The exports include recorded force voltage, calibrated "
+    "force in mN, raw length, normalised length, cycle allocation, "
+    "point within cycle, and every force-smoothing result."
+)
+
+export_column_1, export_column_2 = st.columns(
+    2
 )
 
 with export_column_1:
@@ -1508,7 +1739,7 @@ with export_column_1:
 
     st.download_button(
         label=(
-            "Download all cycles, wide format"
+            "Download all cycles in wide format"
         ),
         data=all_cycles_wide.to_csv(
             index=False
@@ -1536,7 +1767,7 @@ with export_column_2:
 
     st.download_button(
         label=(
-            "Download all cycles, long format"
+            "Download all cycles in long format"
         ),
         data=all_cycles_long.to_csv(
             index=False
@@ -1586,4 +1817,10 @@ st.dataframe(
     metrics_data,
     use_container_width=True,
     hide_index=True,
+)
+
+st.caption(
+    "The force-length integral is calculated with the "
+    "trapezoidal rule. The resulting units are mN multiplied "
+    "by the units used for length."
 )
